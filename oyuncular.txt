@@ -1,0 +1,2 @@
+# Format: PUUID|SummonerName|Tagline|Region|Tier|LP|LastChecked
+JlD2W8BSvsV89DASEmLHORVqfAoxg2stn5fn1nSF7ubxd7-fDuYBXm17ve2Uif-xYouhmdmprJ7A9A|Boun Cmpe|999|TR1|MASTER|200|2026-01-01T00:00:00Z
