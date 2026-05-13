@@ -28,46 +28,55 @@ async function checkPlayer(player) {
     const accountData = await riotPool.fetch(
       `${routing}/riot/account/v1/accounts/by-puuid/${puuid}`
     );
-    console.log(`[Account] OK: ${accountData.gameName}#${accountData.tagLine}`);
     await checkNameChange(player, accountData);
   } catch (err) {
     console.error(`[Account] HATA: ${err.message}`);
     return;
   }
 
-  // ADIM 2: League bilgisi
+  // ADIM 2: Summoner bilgisi (profil ikonu için)
+  let profileIconId = 0;
+  try {
+    const summoner = await riotPool.fetch(
+      `${base}/lol/summoner/v4/summoners/by-puuid/${puuid}`
+    );
+    profileIconId = summoner.profileIconId || 0;
+  } catch (err) {
+    console.error(`[Summoner] HATA: ${err.message}`);
+  }
+
+  // ADIM 3: League bilgisi
   let soloQ;
   try {
     const leagues = await riotPool.fetch(
       `${base}/lol/league/v4/entries/by-puuid/${puuid}`
     );
-    console.log(`[League] ${leagues.length} kayıt bulundu`);
     soloQ = leagues.find(l => l.queueType === 'RANKED_SOLO_5x5');
-    if (!soloQ) {
-      console.log('[League] SoloQ bulunamadı');
-      return;
-    }
+    if (!soloQ) return;
   } catch (err) {
     console.error(`[League] HATA: ${err.message}`);
     return;
   }
 
-  // ADIM 3: LP güncelle
+  // ADIM 4: LP güncelle
   try {
     const newLp = soloQ.leaguePoints;
     const newTier = soloQ.tier;
+    const lpDelta = newLp - lp;
+
+    if (lpDelta < 0 && Math.abs(lpDelta) <= 10) {
+      await detectDodge(puuid, lp, newLp);
+    }
 
     if (newLp !== lp || newTier !== tier) {
-      const lpDelta = newLp - lp;
-
-      if (lpDelta < 0 && Math.abs(lpDelta) <= 10) {
-        await detectDodge(puuid, lp, newLp);
-      }
+      // LP değişti
+      const isWin = lpDelta > 0 && lpDelta > 10;
+      const isLoss = lpDelta < 0 && lpDelta < -10;
 
       await db.query(`
-        UPDATE players SET lp=$1, tier=$2, rank=$3, wins=$4, losses=$5, last_checked_at=NOW()
-        WHERE puuid=$6
-      `, [newLp, newTier, soloQ.rank, soloQ.wins, soloQ.losses, puuid]);
+        UPDATE players SET lp=$1, tier=$2, rank=$3, wins=$4, losses=$5, profile_icon_id=$6, last_checked_at=NOW()
+        WHERE puuid=$7
+      `, [newLp, newTier, soloQ.rank, soloQ.wins, soloQ.losses, profileIconId, puuid]);
 
       await db.query(`
         INSERT INTO daily_stats (puuid, stat_date, start_lp, start_tier, current_lp, current_tier, games_played, wins, losses)
@@ -75,18 +84,23 @@ async function checkPlayer(player) {
         ON CONFLICT (puuid, stat_date) DO UPDATE SET
           current_lp   = $4,
           current_tier = $5,
-          games_played = daily_stats.games_played + CASE WHEN $6 > 0 OR $6 < -10 THEN 1 ELSE 0 END
-      `, [puuid, newLp, newTier, newLp, newTier, lpDelta]);
+          games_played = daily_stats.games_played + 1,
+          wins         = daily_stats.wins + CASE WHEN $6 THEN 1 ELSE 0 END,
+          losses       = daily_stats.losses + CASE WHEN $7 THEN 1 ELSE 0 END
+      `, [puuid, newLp, newTier, newLp, newTier, isWin, isLoss]);
 
       console.log(`[LP] ${current_summoner_name}: ${lp} → ${newLp} (${lpDelta >= 0 ? '+' : ''}${lpDelta})`);
     } else {
-      console.log(`[LP] ${current_summoner_name}: değişim yok (${newLp} LP, ${newTier})`);
+      // LP değişmedi ama ikonu güncelle
+      await db.query(`
+        UPDATE players SET profile_icon_id=$1, last_checked_at=NOW() WHERE puuid=$2
+      `, [profileIconId, puuid]);
     }
   } catch (err) {
     console.error(`[LP] HATA: ${err.message}`);
   }
 
-  // ADIM 4: Canlı oyun
+  // ADIM 5: Canlı oyun
   await checkLiveGame(puuid, base, current_summoner_name);
 }
 
@@ -114,33 +128,26 @@ async function checkLiveGame(puuid, base, name) {
     const liveGame = await riotPool.fetch(
       `${base}/lol/spectator/v5/active-games/by-puuid/${puuid}`
     );
-
     await db.query(`
       UPDATE players SET is_in_game=TRUE, live_game_id=$1 WHERE puuid=$2
     `, [String(liveGame.gameId), puuid]);
-
-    console.log(`[LiveGame] ${name} şu an oyunda! GameID: ${liveGame.gameId}`);
+    console.log(`[LiveGame] ${name} şu an oyunda!`);
   } catch {
     await db.query(`
       UPDATE players SET is_in_game=FALSE, live_game_id=NULL WHERE puuid=$1
     `, [puuid]);
-    console.log(`[LiveGame] ${name} oyunda değil`);
   }
 }
 
-// ────────────────────────────────────────────────
-// Cron: her dakika tüm oyuncuları kontrol et
-// ────────────────────────────────────────────────
+// Cron: her dakika
 cron.schedule('* * * * *', async () => {
   console.log(`\n[Tracker] Çalışıyor: ${new Date().toISOString()}`);
-
   const players = await db.query(`
     SELECT puuid, current_summoner_name, current_tagline, region, tier, lp
     FROM players
     WHERE tier IN ('CHALLENGER','GRANDMASTER','MASTER')
     ORDER BY lp DESC
   `);
-
   for (const p of players.rows) {
     await checkPlayer(p);
   }
@@ -159,21 +166,18 @@ cron.schedule('0 0 * * *', async () => {
   console.log('[DailySnapshot] Tamamlandı');
 });
 
-// ────────────────────────────────────────────────
-// Anında test çalıştırması (program açılır açılmaz bir kez)
-// ────────────────────────────────────────────────
+// Başlangıç testi
 (async () => {
   console.log('[Başlangıç] İlk test çalışıyor...\n');
-
   const players = await db.query(`
     SELECT puuid, current_summoner_name, current_tagline, region, tier, lp
     FROM players
     WHERE tier IN ('CHALLENGER','GRANDMASTER','MASTER')
+    ORDER BY lp DESC
+    LIMIT 5
   `);
-
   for (const p of players.rows) {
     await checkPlayer(p);
   }
-
   console.log('\n[Başlangıç] İlk test bitti. Cron her dakika tekrar edecek...');
 })();
