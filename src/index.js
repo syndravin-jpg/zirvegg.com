@@ -1,5 +1,9 @@
 import 'dotenv/config';
-import './server.js';
-import './workers/playerTracker.js';
 
-console.log('🚀 Server + Worker birlikte başlatıldı');
+async function main() {
+  await import('./server.js');
+  await import('./workers/playerTracker.js');
+  console.log('🚀 Server + Worker birlikte başlatıldı');
+}
+
+main().catch(console.error);
