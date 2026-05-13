@@ -156,4 +156,9 @@ fastify.get('/api/search', async (req, reply) => {
   return { data: result.rows };
 });
 
-fastify.listen({ port: process.env.PORT || 3001, host: '0.0.0.0' });
+try {
+  await fastify.listen({ port: process.env.PORT || 3001, host: '0.0.0.0' });
+} catch (err) {
+  fastify.log.error(err);
+  process.exit(1);
+}
